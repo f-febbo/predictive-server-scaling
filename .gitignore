@@ -19,3 +19,11 @@ infra/.terraform/
 *.tfstate
 *.tfstate.*
 *.tfvars
+
+# Terraform
+infra/.terraform/
+infra/.terraform.lock.hcl
+infra/.build/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/.terraform.tfstate.lock.info
