@@ -1,0 +1,21 @@
+# Data is large and re-downloadable; never commit it.
+data/raw/
+data/processed/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Terraform (Phase 5)
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
