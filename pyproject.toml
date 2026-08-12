@@ -15,6 +15,7 @@ dependencies = [
     "matplotlib>=3.8",
     "requests>=2.31",
     "holidays>=0.50",
+    "scikit-learn>=1.9.0",
 ]
 
 [project.optional-dependencies]
