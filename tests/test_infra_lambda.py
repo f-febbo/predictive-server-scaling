@@ -224,3 +224,84 @@ def _config() -> dict:
         "min_size": 1,
         "max_size": 30,
     }
+
+
+# --- shutdown watchdog ------------------------------------------------------
+
+watchdog = importlib.import_module("watchdog_handler")
+
+HOUR = 3600
+
+
+def test_watchdog_holds_off_during_the_experiment():
+    start = 1_000_000
+
+    assert not watchdog._should_shut_down(start, start, shutdown_after_hours=50)
+    assert not watchdog._should_shut_down(start + 47 * HOUR, start, 50)
+    assert not watchdog._should_shut_down(start + 49.9 * HOUR, start, 50)
+
+
+def test_watchdog_fires_once_the_window_closes():
+    start = 1_000_000
+
+    assert watchdog._should_shut_down(start + 50 * HOUR, start, 50)
+    assert watchdog._should_shut_down(start + 200 * HOUR, start, 50)
+
+
+def test_watchdog_fires_exactly_at_the_boundary():
+    start = 1_000_000
+
+    assert watchdog._should_shut_down(start + 50 * HOUR, start, shutdown_after_hours=50)
+
+
+def test_watchdog_pins_every_group_to_zero(monkeypatch):
+    # max_size matters as much as desired_capacity: predictive scaling and
+    # target tracking would each happily raise capacity again from a floor of
+    # zero if the ceiling were left in place.
+    calls = []
+    monkeypatch.setattr(
+        watchdog.autoscaling,
+        "update_auto_scaling_group",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setenv("REPLAY_START_EPOCH", "0")
+    monkeypatch.setenv("SHUTDOWN_AFTER_HOURS", "50")
+    monkeypatch.setenv("ASG_NAMES", "arm-a,arm-b")
+
+    result = watchdog.handler({}, None)
+
+    assert result["status"] == "shut_down"
+    assert len(calls) == 2
+    for call in calls:
+        assert call["MinSize"] == 0
+        assert call["MaxSize"] == 0
+        assert call["DesiredCapacity"] == 0
+
+
+def test_watchdog_reports_time_remaining_while_running(monkeypatch):
+    monkeypatch.setenv(
+        "REPLAY_START_EPOCH",
+        str(int(dt.datetime.now(dt.timezone.utc).timestamp())),
+    )
+    monkeypatch.setenv("SHUTDOWN_AFTER_HOURS", "50")
+    monkeypatch.setenv("ASG_NAMES", "arm-a")
+
+    result = watchdog.handler({}, None)
+
+    assert result["status"] == "running"
+    assert 49 < result["hours_remaining"] <= 50
+
+
+def test_one_failing_group_does_not_block_the_others(monkeypatch):
+    def flaky(**kwargs):
+        if kwargs["AutoScalingGroupName"] == "arm-a":
+            raise RuntimeError("throttled")
+
+    monkeypatch.setattr(watchdog.autoscaling, "update_auto_scaling_group", flaky)
+    monkeypatch.setenv("REPLAY_START_EPOCH", "0")
+    monkeypatch.setenv("SHUTDOWN_AFTER_HOURS", "50")
+    monkeypatch.setenv("ASG_NAMES", "arm-a,arm-b")
+
+    result = watchdog.handler({}, None)
+
+    assert result["groups"] == ["arm-b"]

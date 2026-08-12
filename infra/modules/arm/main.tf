@@ -170,9 +170,11 @@ resource "aws_autoscaling_group" "workers" {
   }
 
   # Terraform must not fight the scaler over desired capacity; whatever is
-  # driving this arm owns it after creation.
+  # driving this arm owns it after creation. min_size and max_size are ignored
+  # too because the shutdown watchdog pins them to zero when the experiment
+  # window closes, and a later plan should not offer to undo that.
   lifecycle {
-    ignore_changes = [desired_capacity]
+    ignore_changes = [desired_capacity, min_size, max_size]
   }
 
   tag {

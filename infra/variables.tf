@@ -112,6 +112,19 @@ variable "enable_native_predictive_scaling" {
 
 # --- guard rails ------------------------------------------------------------
 
+variable "shutdown_after_hours" {
+  description = <<-EOT
+    Hours after the replay starts at which the watchdog pins every fleet to
+    zero capacity. The replay itself is 48 hours, so the default leaves a
+    couple of hours of slack to observe the drain before the meter stops.
+
+    This is a cost backstop, not a teardown: the stack still has to be
+    destroyed with `destroy.sh`.
+  EOT
+  type        = number
+  default     = 50
+}
+
 variable "monthly_budget_usd" {
   description = "Budget alarm threshold. Deliberately low."
   type        = number
