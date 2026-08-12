@@ -25,13 +25,40 @@ variable "asg_max_size" {
     Keep it low.
   EOT
   type        = number
-  default     = 30
+  default     = 8
 
   validation {
     condition     = var.asg_max_size <= 50
     error_message = "asg_max_size is capped at 50 to prevent a runaway bill."
   }
 }
+
+# NOTE ON EC2 SPOT QUOTAS
+#
+# The binding constraint on this stack is not cost, it is the account's spot
+# vCPU quota. A new account typically allows 32 vCPUs of standard spot, which
+# at 2 vCPU per t4g.small is 16 instances TOTAL, shared across both arms.
+#
+# The first run of this stack was configured well past that ceiling: the
+# scaler asked for 16 instances for one arm alone, and the ASG spent half an
+# hour failing launches with "Max spot instance count exceeded" while its
+# queue backed up. Nothing in the Terraform surfaced the limit, because
+# nothing checks it.
+#
+# So asg_max_size and arrival_divisor have to be chosen together against the
+# quota:
+#
+#     peak instances per arm  ~=  peak_arrivals_per_min
+#                                 -------------------------------------
+#                                 arrival_divisor x 60 / service_seconds
+#                                 x target_utilization
+#
+# With the trace's 137/min peak, arrival_divisor=15 and a 30s service time,
+# that is about 6 instances per arm, or 12 of the 16 available. Check the
+# quota before raising either:
+#
+#     aws service-quotas get-service-quota --service-code ec2 \
+#       --quota-code L-34B43A08 --region us-east-1
 
 variable "asg_min_size" {
   description = "Floor on the fleet."
@@ -73,7 +100,7 @@ variable "arrival_divisor" {
     only thing that makes the live run comparable to the offline results.
   EOT
   type        = number
-  default     = 5
+  default     = 15
 }
 
 variable "horizon_minutes" {

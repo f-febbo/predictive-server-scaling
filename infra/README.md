@@ -69,6 +69,52 @@ quietly runs up a bill:
 - **A hard `asg_max_size` cap**, validated at 50 or below. This bounds the
   hourly burn rate no matter what the scaler does.
 
+## The binding constraint is the spot quota, not the budget
+
+Check this before deploying:
+
+```bash
+aws service-quotas get-service-quota \
+  --service-code ec2 --quota-code L-34B43A08 --region us-east-1
+```
+
+A new AWS account typically allows **32 vCPUs of standard spot**, which at 2
+vCPU per `t4g.small` is **16 instances in total, shared across both arms**.
+
+The first run of this stack was configured straight past that ceiling. With
+`arrival_divisor = 5` the scaler asked for 16 instances for the custom arm
+alone; two arms at peak would have needed roughly 32 instances, or double the
+account limit. The native arm spent half an hour failing launches with
+`Max spot instance count exceeded` while its queue backed up, and because both
+arms draw from the same pool, the healthy arm's usage was part of what starved
+the other one.
+
+Nothing in the Terraform surfaced this, because nothing checks quotas. The two
+knobs have to be chosen together against the limit:
+
+```
+peak instances per arm  ~=  peak_arrivals_per_min
+                            ------------------------------------------------
+                            arrival_divisor x (60 / service_seconds) x target_utilization
+```
+
+At the trace's 137/min peak with `arrival_divisor = 15` and a 30s service time,
+that is about 6 instances per arm — 12 of the 16 available, leaving headroom
+for instance replacement.
+
+## A flat SLI can mean the metric is lying
+
+`message_retention_seconds` was originally one hour. A backlogged queue then
+reported `ApproximateAgeOfOldestMessage` pinned at exactly 3600s, hour after
+hour, while every message older than that was silently deleted.
+
+Read quickly, a flat age metric looks like a system holding steady. It meant
+the opposite: the backlog had grown past the point where the metric could
+describe it. Retention is now four hours, comfortably longer than any backlog
+the run should produce, so the metric stays truthful — and an age curve that
+flattens near the retention limit should always be treated as a measurement
+failure rather than a result.
+
 ## Running it
 
 Prerequisites: Terraform ≥ 1.5, AWS credentials, and the Phase 4 backtest run

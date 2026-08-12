@@ -13,7 +13,13 @@ resource "aws_sqs_queue" "work" {
   # Comfortably longer than service_seconds, so a merely slow worker does not
   # have its message handed to a second worker and processed twice.
   visibility_timeout_seconds = var.service_seconds * 6
-  message_retention_seconds  = 3600
+
+  # Long enough that retention never truncates the measurement. This was
+  # originally an hour, which silently destroyed the SLI: a backlogged queue
+  # reported ApproximateAgeOfOldestMessage pinned at exactly 3600s while
+  # messages older than that were deleted. A flat age metric read like a
+  # stable system when it actually meant the opposite.
+  message_retention_seconds = 14400
 
   # Long polling. Short polling bills an empty receive every few hundred
   # milliseconds per idle worker, which is the one way this stack could run up
@@ -169,12 +175,16 @@ resource "aws_autoscaling_group" "workers" {
     version = "$Latest"
   }
 
-  # Terraform must not fight the scaler over desired capacity; whatever is
-  # driving this arm owns it after creation. min_size and max_size are ignored
-  # too because the shutdown watchdog pins them to zero when the experiment
-  # window closes, and a later plan should not offer to undo that.
+  # Terraform must not fight the scaler over desired capacity, so that field is
+  # owned by whatever drives this arm once the group exists.
+  #
+  # min_size and max_size stay under Terraform's control, because they have to
+  # be tunable against the account's spot quota. The cost is that running
+  # `terraform apply` AFTER the shutdown watchdog has pinned the group to zero
+  # would restore the bounds and relaunch instances. Run `destroy.sh` at the
+  # end of an experiment, not `apply`.
   lifecycle {
-    ignore_changes = [desired_capacity, min_size, max_size]
+    ignore_changes = [desired_capacity]
   }
 
   tag {
