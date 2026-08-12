@@ -1,0 +1,26 @@
+Arrival trace: training window
+==============================
+window            : 2024-01-01 00:00:00 .. 2024-02-17 23:59:00
+observations      : 69,120 minutes
+total arrivals    : 4,722,644
+
+Arrival rate (arrivals per minute)
+  mean            : 68.33
+  median          : 77.00
+  std dev         : 40.58
+  min             : 0
+  p99             : 148.00
+  max             : 222
+
+Burstiness  (Poisson = 1.0; higher means burstier)
+  raw index of dispersion      : 24.10
+  seasonally-adjusted          : 3.20
+  The raw figure counts the predictable daily swing as burstiness. The
+  adjusted figure removes the hour-of-week seasonal mean first, so it
+  reflects only what a seasonal forecaster cannot anticipate.
+
+Autocorrelation
+  lag 1min        : +0.957
+  lag 1hour       : +0.883
+  lag 1day        : +0.812
+  lag 1week       : +0.901

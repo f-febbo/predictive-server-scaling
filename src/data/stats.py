@@ -9,6 +9,8 @@ rather than buried.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 import pandas as pd
 
@@ -35,6 +37,35 @@ def index_of_dispersion(series: pd.Series) -> float:
     if mean == 0:
         return float("nan")
     return float(series.var(ddof=1) / mean)
+
+
+def seasonal_expectation(series: pd.Series) -> pd.Series:
+    """The hour-of-week seasonal mean, broadcast back onto the series index.
+
+    This is exactly what a seasonal-naive forecaster predicts, so the gap
+    between it and the actual series is the part of the load that such a
+    forecaster cannot anticipate.
+    """
+    hour_of_week = series.index.dayofweek * 24 + series.index.hour
+    profile = series.groupby(hour_of_week).mean()
+    return pd.Series(profile.loc[hour_of_week].to_numpy(), index=series.index)
+
+
+def residual_index_of_dispersion(series: pd.Series) -> float:
+    """Variance-to-mean ratio of what the weekly seasonal shape fails to explain.
+
+    The plain `index_of_dispersion` counts the daily rush-hour swing as
+    burstiness. That swing is entirely predictable, so crediting it overstates
+    how hard the traffic is to scale for. Removing the seasonal mean first
+    leaves the genuinely unanticipated fluctuation, measured on the same scale:
+    1.0 is Poisson, higher means bursty beyond pure randomness.
+    """
+    mean = series.mean()
+    if mean == 0:
+        return float("nan")
+
+    residual = series - seasonal_expectation(series)
+    return float(residual.var(ddof=1) / mean)
 
 
 def autocorrelation_at_lags(
@@ -100,8 +131,60 @@ def summarize_arrivals(
         "p99": float(np.percentile(series, 99)),
         "max": int(series.max()),
         "index_of_dispersion": index_of_dispersion(series),
+        "residual_index_of_dispersion": residual_index_of_dispersion(series),
         "autocorrelation": autocorrelation_at_lags(series, lags),
     }
+
+
+def daily_profile(
+    series: pd.Series,
+    resolution: str = "minute",
+    agg: Callable[[pd.core.groupby.SeriesGroupBy], pd.Series] | None = None,
+) -> pd.Series:
+    """Arrival rate by position within the day, averaged across days.
+
+    Args:
+        series: 1-minute arrival counts.
+        resolution: ``"minute"`` for a 1440-point profile, ``"hour"`` for 24.
+        agg: How to combine the values that share a position in the day.
+            Defaults to the mean; pass a quantile to draw a spread band.
+
+    Returns:
+        Arrivals per minute at each position in the day, indexed by
+        minute-of-day (0..1439) or hour-of-day (0..23).
+    """
+    index = series.index
+    if resolution == "minute":
+        position = index.hour * 60 + index.minute
+        full_range = range(1440)
+    elif resolution == "hour":
+        position = index.hour
+        full_range = range(24)
+    else:
+        raise ValueError(f"resolution must be 'minute' or 'hour', got {resolution!r}")
+
+    agg = agg or (lambda group: group.mean())
+    profile = agg(series.groupby(position))
+    profile = profile.reindex(full_range, fill_value=0.0)
+    profile.index.name = f"{resolution}_of_day"
+    return profile
+
+
+def weekly_profile(series: pd.Series) -> pd.Series:
+    """Average arrival rate by hour of the week.
+
+    Returns:
+        168 points indexed by hour-of-week, where 0 is Monday 00:00. Values are
+        arrivals per minute, so they are directly comparable with the daily
+        profile rather than being 60x larger.
+    """
+    index = series.index
+    hour_of_week = index.dayofweek * 24 + index.hour
+
+    profile = series.groupby(hour_of_week).mean()
+    profile = profile.reindex(range(168), fill_value=0.0)
+    profile.index.name = "hour_of_week"
+    return profile
 
 
 def format_summary(summary: dict, title: str = "Arrival series summary") -> str:
@@ -121,9 +204,12 @@ def format_summary(summary: dict, title: str = "Arrival series summary") -> str:
         f"  p99             : {summary['p99']:.2f}",
         f"  max             : {summary['max']}",
         "",
-        "Burstiness",
-        f"  index of dispersion : {summary['index_of_dispersion']:.2f}"
-        "   (Poisson = 1.0; higher means burstier)",
+        "Burstiness  (Poisson = 1.0; higher means burstier)",
+        f"  raw index of dispersion      : {summary['index_of_dispersion']:.2f}",
+        f"  seasonally-adjusted          : {summary['residual_index_of_dispersion']:.2f}",
+        "  The raw figure counts the predictable daily swing as burstiness. The",
+        "  adjusted figure removes the hour-of-week seasonal mean first, so it",
+        "  reflects only what a seasonal forecaster cannot anticipate.",
         "",
         "Autocorrelation",
     ]
