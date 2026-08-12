@@ -66,9 +66,20 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
     config = _config()
     minute = _replay_minute(config["replay_start_epoch"])
 
-    if minute < 0 or minute >= len(FORECAST):
-        logger.info("Replay minute %s is outside the trace; leaving capacity alone.", minute)
-        return {"status": "outside_replay_window", "minute": minute}
+    if minute >= len(FORECAST):
+        # The replay has finished. Scale back to the floor rather than leaving
+        # the fleet frozen at its last decision: the load generator has stopped,
+        # so those instances would poll an empty queue and bill indefinitely.
+        # This is a cost guard, not a teardown -- the stack still has to be
+        # destroyed explicitly.
+        _scale_to_floor(config)
+        return {"status": "replay_finished", "minute": minute}
+
+    if minute < 0:
+        # Applied slightly before the replay clock starts; the fleet is already
+        # at its floor, so there is nothing to do.
+        logger.info("Replay has not started yet (minute %s).", minute)
+        return {"status": "before_replay", "minute": minute}
 
     predicted = FORECAST[minute]
     if predicted is None or not math.isfinite(predicted):
@@ -108,6 +119,24 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
         "correction": correction,
         "desired": desired,
     }
+
+
+def _scale_to_floor(config: dict) -> None:
+    """Return the fleet to its minimum size.
+
+    Used once the replay is over. Without this the fleet stays wherever the
+    last forecast put it — possibly a dozen instances — polling a queue that
+    nothing is feeding, for as long as the stack exists.
+    """
+    try:
+        autoscaling.set_desired_capacity(
+            AutoScalingGroupName=config["asg_name"],
+            DesiredCapacity=config["min_size"],
+            HonorCooldown=False,
+        )
+        logger.info("Replay finished; scaled to floor of %s.", config["min_size"])
+    except Exception:
+        logger.exception("Could not scale down after the replay finished.")
 
 
 def _config() -> dict:

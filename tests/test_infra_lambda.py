@@ -19,8 +19,17 @@ import pytest
 LAMBDA_DIR = Path(__file__).resolve().parents[1] / "infra" / "lambda"
 
 # boto3 clients are created at import time, as AWS recommends for connection
-# reuse. They need a region even when no call is made.
-os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+# reuse, and creating one resolves region and credentials. Pin dummy static
+# credentials so the suite does not depend on whatever profile happens to be
+# configured on the machine running it — otherwise these tests pass or fail
+# based on someone's ~/.aws/config, which has nothing to do with the code.
+# No API call is ever made; every AWS call in these tests is patched out.
+os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+os.environ["AWS_SESSION_TOKEN"] = "testing"
+os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
+os.environ.pop("AWS_PROFILE", None)
+
 sys.path.insert(0, str(LAMBDA_DIR))
 
 scaler = importlib.import_module("scaler_handler")
@@ -72,6 +81,59 @@ def test_replay_minute_counts_whole_minutes_since_the_start():
     assert scaler._replay_minute(int(now)) == 0
     assert scaler._replay_minute(int(now - 599)) == 9
     assert scaler._replay_minute(int(now - 600)) == 10
+
+
+def test_the_fleet_is_returned_to_its_floor_once_the_replay_ends(monkeypatch):
+    # Otherwise the fleet stays wherever the last forecast put it, polling a
+    # queue nothing is feeding, billing until someone notices. This is a cost
+    # guard, so it is worth a test of its own.
+    calls = []
+    monkeypatch.setattr(
+        scaler.autoscaling,
+        "set_desired_capacity",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    # A replay start far enough in the past that the trace has run out.
+    past = int(dt.datetime.now(dt.timezone.utc).timestamp()) - (len(scaler.TRACE) + 10) * 60
+    monkeypatch.setenv("REPLAY_START_EPOCH", str(past))
+    _set_required_env(monkeypatch)
+
+    result = scaler.handler({}, None)
+
+    assert result["status"] == "replay_finished"
+    assert len(calls) == 1
+    assert calls[0]["DesiredCapacity"] == 1
+
+
+def test_nothing_is_scaled_before_the_replay_starts(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        scaler.autoscaling,
+        "set_desired_capacity",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    future = int(dt.datetime.now(dt.timezone.utc).timestamp()) + 600
+    monkeypatch.setenv("REPLAY_START_EPOCH", str(future))
+    _set_required_env(monkeypatch)
+
+    result = scaler.handler({}, None)
+
+    assert result["status"] == "before_replay"
+    assert calls == []
+
+
+def _set_required_env(monkeypatch) -> None:
+    for key, value in {
+        "ASG_NAME": "test-asg",
+        "QUEUE_NAME": "test-queue",
+        "METRIC_NAMESPACE": "Test",
+        "SERVICE_SECONDS": "30",
+        "TARGET_UTILIZATION": "0.8",
+        "ARRIVAL_DIVISOR": "5",
+        "MIN_SIZE": "1",
+        "MAX_SIZE": "30",
+    }.items():
+        monkeypatch.setenv(key, value)
 
 
 def test_replay_minute_is_negative_before_the_start():

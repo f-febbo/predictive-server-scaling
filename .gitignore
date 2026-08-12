@@ -21,9 +21,20 @@ infra/.terraform/
 *.tfvars
 
 # Terraform
+# NOTE: .terraform.lock.hcl is deliberately NOT ignored. It pins provider
+# versions and belongs in version control so a clean checkout resolves the
+# same providers.
 infra/.terraform/
-infra/.terraform.lock.hcl
 infra/.build/
+
+# Plan files are build artefacts, and can carry sensitive attribute values
+# once real resources exist.
+infra/tfplan
+infra/*.tfplan
+
+# State holds every resource attribute in plaintext, including anything the
+# providers mark sensitive. Never commit it.
 infra/*.tfstate
 infra/*.tfstate.*
 infra/.terraform.tfstate.lock.info
+infra/crash.log
