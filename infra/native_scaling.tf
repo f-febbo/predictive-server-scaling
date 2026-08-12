@@ -18,6 +18,20 @@
 # forecast is built on very little data. A 48-hour run therefore demonstrates
 # that the integration is correct, not that the managed feature is at its best.
 # Any comparison drawn from a short run must say so.
+#
+# NOTE ON METRIC MATH: every metric below is addressed directly through
+# metric_stat rather than through a SEARCH() expression. Target tracking
+# policies are backed by CloudWatch metric alarms, and alarms reject SEARCH
+# ("SEARCH is not supported on Metric Alarms"). SEARCH exists for wildcard
+# discovery, which is unnecessary here because the queue and group names are
+# known when the plan is generated.
+
+locals {
+  # Backlog per instance that keeps the oldest message inside the latency
+  # budget, from Little's Law: a 60s budget divided by the service time is how
+  # many messages a worker can clear in time.
+  backlog_target = var.service_seconds > 0 ? 60 / var.service_seconds : 2
+}
 
 resource "aws_autoscaling_policy" "native_predictive" {
   count = var.enable_native_predictive_scaling ? 1 : 0
@@ -27,25 +41,34 @@ resource "aws_autoscaling_policy" "native_predictive" {
   policy_type            = "PredictiveScaling"
 
   predictive_scaling_configuration {
-    # Scale out ahead of the forecast but never scale in on it; scaling in is
-    # left to the target-tracking policy below, which sees the real queue.
+    # Forecast and act on it, buffering capacity slightly ahead of the
+    # predicted need so instances finish booting before the load lands.
     mode                         = "ForecastAndScale"
     scheduling_buffer_time       = 300
     max_capacity_breach_behavior = "IncreaseMaxCapacity"
     max_capacity_buffer          = 10
 
     metric_specification {
-      # Backlog per instance that keeps the oldest message inside the latency
-      # budget: 60s budget / 30s per message = 2 messages per worker.
-      target_value = var.service_seconds > 0 ? 60 / var.service_seconds : 2
+      target_value = local.backlog_target
 
       # Total load offered to the fleet.
       customized_load_metric_specification {
         metric_data_queries {
-          id          = "load"
-          expression  = "SUM(SEARCH('{AWS/SQS,QueueName} MetricName=\"NumberOfMessagesSent\" QueueName=\"${module.arm["native"].queue_name}\"', 'Sum'))"
-          label       = "Messages enqueued"
-          return_data = true
+          id = "load"
+
+          metric_stat {
+            metric {
+              namespace   = "AWS/SQS"
+              metric_name = "NumberOfMessagesSent"
+
+              dimensions {
+                name  = "QueueName"
+                value = module.arm["native"].queue_name
+              }
+            }
+
+            stat = "Sum"
+          }
         }
       }
 
@@ -74,13 +97,26 @@ resource "aws_autoscaling_policy" "native_predictive" {
       customized_scaling_metric_specification {
         metric_data_queries {
           id          = "backlog"
-          expression  = "SUM(SEARCH('{AWS/SQS,QueueName} MetricName=\"ApproximateNumberOfMessagesVisible\" QueueName=\"${module.arm["native"].queue_name}\"', 'Average'))"
-          label       = "Messages visible"
           return_data = false
+
+          metric_stat {
+            metric {
+              namespace   = "AWS/SQS"
+              metric_name = "ApproximateNumberOfMessagesVisible"
+
+              dimensions {
+                name  = "QueueName"
+                value = module.arm["native"].queue_name
+              }
+            }
+
+            stat = "Average"
+          }
         }
 
         metric_data_queries {
-          id = "instances"
+          id          = "instances"
+          return_data = false
 
           metric_stat {
             metric {
@@ -95,14 +131,15 @@ resource "aws_autoscaling_policy" "native_predictive" {
 
             stat = "Average"
           }
-
-          return_data = false
         }
 
         metric_data_queries {
-          id         = "backlog_per_instance"
-          expression = "backlog / MAX([instances, 1])"
-          label      = "Backlog per instance"
+          id    = "backlog_per_instance"
+          label = "Backlog per instance"
+          # Plain division, as AWS documents for this pattern. If the group is
+          # ever at zero instances the expression yields no data point rather
+          # than an error, which the alarm treats as missing data.
+          expression = "backlog / instances"
         }
       }
     }
@@ -111,7 +148,7 @@ resource "aws_autoscaling_policy" "native_predictive" {
 
 # Predictive scaling handles the anticipated shape; target tracking handles
 # whatever the hourly forecast missed. AWS recommends pairing them, and without
-# it this arm would have no way to respond to a burst inside the hour — which
+# it this arm would have no way to respond to a burst inside the hour -- which
 # would make the comparison a strawman rather than a measurement.
 resource "aws_autoscaling_policy" "native_target_tracking" {
   count = var.enable_native_predictive_scaling ? 1 : 0
@@ -121,13 +158,26 @@ resource "aws_autoscaling_policy" "native_target_tracking" {
   policy_type            = "TargetTrackingScaling"
 
   target_tracking_configuration {
-    target_value = var.service_seconds > 0 ? 60 / var.service_seconds : 2
+    target_value = local.backlog_target
 
     customized_metric_specification {
       metrics {
         id          = "backlog"
-        expression  = "SUM(SEARCH('{AWS/SQS,QueueName} MetricName=\"ApproximateNumberOfMessagesVisible\" QueueName=\"${module.arm["native"].queue_name}\"', 'Average'))"
         return_data = false
+
+        metric_stat {
+          metric {
+            namespace   = "AWS/SQS"
+            metric_name = "ApproximateNumberOfMessagesVisible"
+
+            dimensions {
+              name  = "QueueName"
+              value = module.arm["native"].queue_name
+            }
+          }
+
+          stat = "Average"
+        }
       }
 
       metrics {
@@ -151,7 +201,7 @@ resource "aws_autoscaling_policy" "native_target_tracking" {
 
       metrics {
         id          = "backlog_per_instance"
-        expression  = "backlog / MAX([instances, 1])"
+        expression  = "backlog / instances"
         return_data = true
       }
     }
