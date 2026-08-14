@@ -21,6 +21,7 @@ module "arm" {
   for_each = toset(local.arms)
 
   name                  = "${var.project}-${each.key}"
+  project               = var.project
   vpc_id                = aws_vpc.main.id
   subnet_ids            = aws_subnet.public[*].id
   security_group_id     = aws_security_group.worker.id

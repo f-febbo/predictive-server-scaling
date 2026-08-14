@@ -114,17 +114,9 @@ resource "aws_launch_template" "worker" {
   vpc_security_group_ids = [var.security_group_id]
   user_data              = base64encode(local.user_data)
 
-  # Spot, but without a max price: the default is the on-demand price, and
-  # naming a lower ceiling is the usual way to get silently starved of capacity
-  # and mistake it for a scaling bug.
-  instance_market_options {
-    market_type = "spot"
-
-    spot_options {
-      spot_instance_type             = "one-time"
-      instance_interruption_behavior = "terminate"
-    }
-  }
+  # Spot purchasing is configured on the ASG's mixed_instances_policy rather
+  # than here, so that the group can fall back across instance types. Setting
+  # instance_market_options as well would conflict with it.
 
   monitoring {
     # EC2 detailed monitoring is deliberately OFF. It bills about $2.10 per
@@ -170,9 +162,40 @@ resource "aws_autoscaling_group" "workers" {
     "GroupTotalInstances",
   ]
 
-  launch_template {
-    id      = aws_launch_template.worker.id
-    version = "$Latest"
+  # A single spot instance type in a single family is a single point of
+  # failure. Mid-run this group spent hours unable to launch anything --
+  # "We currently do not have sufficient t4g.small capacity in the
+  # Availability Zone you requested" -- while its queue backed up. That is not
+  # a scaling result, it is a capacity result, and it contaminates the
+  # comparison the experiment is trying to make.
+  #
+  # Offering several Graviton types across both subnets lets the group take
+  # whatever spot capacity exists. They differ in size, which is wasteful when
+  # a worker handles one message at a time, but an oversized instance that
+  # exists beats a correctly sized one that does not.
+  mixed_instances_policy {
+    launch_template {
+      launch_template_specification {
+        launch_template_id = aws_launch_template.worker.id
+        version            = "$Latest"
+      }
+
+      override { instance_type = "t4g.small" }
+      override { instance_type = "t4g.medium" }
+      override { instance_type = "t4g.large" }
+      override { instance_type = "m6g.medium" }
+      override { instance_type = "m6g.large" }
+      override { instance_type = "c6g.medium" }
+      override { instance_type = "c6g.large" }
+    }
+
+    instances_distribution {
+      # One on-demand instance per arm, so the fleet can never be driven to
+      # zero by a spot shortage. Everything above that is spot.
+      on_demand_base_capacity                  = 1
+      on_demand_percentage_above_base_capacity = 0
+      spot_allocation_strategy                 = "capacity-optimized"
+    }
   }
 
   # Terraform must not fight the scaler over desired capacity, so that field is
@@ -190,6 +213,17 @@ resource "aws_autoscaling_group" "workers" {
   tag {
     key                 = "Name"
     value               = "${var.name}-worker"
+    propagate_at_launch = true
+  }
+
+  # Tagged explicitly because the provider's default_tags do NOT reach
+  # instances launched by an Auto Scaling group -- the ASG service launches
+  # them, not Terraform. Without this, instances carry no Project tag, and any
+  # teardown check that filters on one reports a clean account while the fleet
+  # is still running.
+  tag {
+    key                 = "Project"
+    value               = var.project
     propagate_at_launch = true
   }
 

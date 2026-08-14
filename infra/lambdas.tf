@@ -53,15 +53,17 @@ resource "aws_lambda_function" "scaler" {
 
   environment {
     variables = {
-      ASG_NAME           = module.arm["custom"].asg_name
-      QUEUE_NAME         = module.arm["custom"].queue_name
-      METRIC_NAMESPACE   = local.metric_namespace
-      REPLAY_START_EPOCH = local.replay_start_epoch
-      SERVICE_SECONDS    = tostring(var.service_seconds)
-      TARGET_UTILIZATION = tostring(var.target_utilization)
-      ARRIVAL_DIVISOR    = tostring(var.arrival_divisor)
-      MIN_SIZE           = tostring(var.asg_min_size)
-      MAX_SIZE           = tostring(var.asg_max_size)
+      ASG_NAME              = module.arm["custom"].asg_name
+      QUEUE_NAME            = module.arm["custom"].queue_name
+      QUEUE_URL             = module.arm["custom"].queue_url
+      BACKLOG_DRAIN_SECONDS = tostring(var.backlog_drain_seconds)
+      METRIC_NAMESPACE      = local.metric_namespace
+      REPLAY_START_EPOCH    = local.replay_start_epoch
+      SERVICE_SECONDS       = tostring(var.service_seconds)
+      TARGET_UTILIZATION    = tostring(var.target_utilization)
+      ARRIVAL_DIVISOR       = tostring(var.arrival_divisor)
+      MIN_SIZE              = tostring(var.asg_min_size)
+      MAX_SIZE              = tostring(var.asg_max_size)
     }
   }
 }

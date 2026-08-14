@@ -43,6 +43,7 @@ logger.setLevel(logging.INFO)
 
 autoscaling = boto3.client("autoscaling")
 cloudwatch = boto3.client("cloudwatch")
+sqs = boto3.client("sqs")
 
 HERE = pathlib.Path(__file__).parent
 SECONDS_PER_MINUTE = 60.0
@@ -89,11 +90,20 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
     correction = _recent_level_correction(config, minute)
     corrected = predicted * correction
 
-    desired = _instances_for(
+    for_arrivals = _instances_for(
         arrivals_per_minute=corrected / config["arrival_divisor"],
         service_seconds=config["service_seconds"],
         target_utilization=config["target_utilization"],
     )
+
+    # The reactive floor. Sizing for the incoming rate alone provisions exactly
+    # enough to keep pace and nothing to catch up with, so any backlog — from a
+    # forecast miss, a spot capacity shortfall, an instance that died — would
+    # persist indefinitely. Phase 4 measured this: the pure predictive policy
+    # posted a p99 message age of 8,960s in the worst case, while the composed
+    # variant stayed under a minute. This is that composition.
+    for_backlog = _instances_to_drain(config)
+    desired = max(for_arrivals, for_backlog)
     desired = max(config["min_size"], min(config["max_size"], desired))
 
     autoscaling.set_desired_capacity(
@@ -103,11 +113,14 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
     )
 
     logger.info(
-        "minute=%s forecast=%.1f correction=%.2f corrected=%.1f desired=%s",
+        "minute=%s forecast=%.1f correction=%.2f corrected=%.1f "
+        "for_arrivals=%s for_backlog=%s desired=%s",
         minute,
         predicted,
         correction,
         corrected,
+        for_arrivals,
+        for_backlog,
         desired,
     )
     _publish(config, minute, predicted, corrected, desired)
@@ -119,6 +132,37 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
         "correction": correction,
         "desired": desired,
     }
+
+
+def _instances_to_drain(config: dict) -> int:
+    """Capacity needed to clear the current backlog inside the drain budget.
+
+    Each waiting message occupies a worker for `service_seconds`, so clearing
+    `depth` of them within `backlog_drain_seconds` needs that much work divided
+    by the time allowed. Reads the queue directly rather than via CloudWatch,
+    because queue depth is available immediately while the metric lags by up to
+    a minute — and when the fleet is behind, a minute matters.
+    """
+    depth = _queue_depth(config)
+    if depth <= 0:
+        return 0
+
+    work_seconds = depth * config["service_seconds"]
+    return math.ceil(work_seconds / config["backlog_drain_seconds"])
+
+
+def _queue_depth(config: dict) -> int:
+    """Messages waiting, not counting those already being processed."""
+    try:
+        response = sqs.get_queue_attributes(
+            QueueUrl=config["queue_url"],
+            AttributeNames=["ApproximateNumberOfMessages"],
+        )
+        return int(response["Attributes"]["ApproximateNumberOfMessages"])
+    except Exception:
+        # Fall back to the forecast alone rather than failing the tick.
+        logger.exception("Could not read queue depth.")
+        return 0
 
 
 def _scale_to_floor(config: dict) -> None:
@@ -143,6 +187,8 @@ def _config() -> dict:
     return {
         "asg_name": os.environ["ASG_NAME"],
         "queue_name": os.environ["QUEUE_NAME"],
+        "queue_url": os.environ["QUEUE_URL"],
+        "backlog_drain_seconds": float(os.environ["BACKLOG_DRAIN_SECONDS"]),
         "namespace": os.environ["METRIC_NAMESPACE"],
         "replay_start_epoch": int(os.environ["REPLAY_START_EPOCH"]),
         "service_seconds": float(os.environ["SERVICE_SECONDS"]),

@@ -126,6 +126,8 @@ def _set_required_env(monkeypatch) -> None:
     for key, value in {
         "ASG_NAME": "test-asg",
         "QUEUE_NAME": "test-queue",
+        "QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/1/test-queue",
+        "BACKLOG_DRAIN_SECONDS": "300",
         "METRIC_NAMESPACE": "Test",
         "SERVICE_SECONDS": "30",
         "TARGET_UTILIZATION": "0.8",
@@ -216,6 +218,8 @@ def _config() -> dict:
     return {
         "asg_name": "test-asg",
         "queue_name": "test-queue",
+        "queue_url": "https://sqs.us-east-1.amazonaws.com/1/test-queue",
+        "backlog_drain_seconds": 300.0,
         "namespace": "Test",
         "replay_start_epoch": 0,
         "service_seconds": 30.0,
@@ -305,3 +309,61 @@ def test_one_failing_group_does_not_block_the_others(monkeypatch):
     result = watchdog.handler({}, None)
 
     assert result["groups"] == ["arm-b"]
+
+
+# --- the reactive floor -----------------------------------------------------
+
+
+def test_backlog_needs_no_capacity_when_the_queue_is_empty(monkeypatch):
+    monkeypatch.setattr(scaler, "_queue_depth", lambda *_: 0)
+
+    assert scaler._instances_to_drain(_config()) == 0
+
+
+def test_backlog_capacity_clears_the_queue_within_the_drain_budget(monkeypatch):
+    # 600 queued messages at 30s each is 18,000 seconds of work; clearing that
+    # inside 300s takes 60 workers.
+    monkeypatch.setattr(scaler, "_queue_depth", lambda *_: 600)
+
+    assert scaler._instances_to_drain(_config()) == 60
+
+
+def test_backlog_capacity_rounds_up(monkeypatch):
+    monkeypatch.setattr(scaler, "_queue_depth", lambda *_: 1)
+
+    assert scaler._instances_to_drain(_config()) == 1
+
+
+def test_an_unreadable_queue_falls_back_to_the_forecast_alone(monkeypatch):
+    # A failed SQS call must not take the scaler down.
+    def boom(**kwargs):
+        raise RuntimeError("throttled")
+
+    monkeypatch.setattr(scaler.sqs, "get_queue_attributes", boom)
+
+    assert scaler._instances_to_drain(_config()) == 0
+
+
+def test_the_backlog_floor_lifts_capacity_above_the_forecast(monkeypatch):
+    # The whole point of the composition: a backlog the forecast never
+    # predicted still gets capacity. Without this the scaler provisions purely
+    # for the incoming rate and can never catch up -- which is exactly how the
+    # first live run stalled after losing spot capacity.
+    calls = []
+    monkeypatch.setattr(
+        scaler.autoscaling, "set_desired_capacity", lambda **kw: calls.append(kw)
+    )
+    monkeypatch.setattr(scaler, "_observed_arrivals", lambda *_, **__: None)
+    monkeypatch.setattr(scaler, "_queue_depth", lambda *_: 600)
+    monkeypatch.setattr(scaler, "_publish", lambda *_, **__: None)
+
+    start = int(dt.datetime.now(dt.timezone.utc).timestamp()) - 600
+    monkeypatch.setenv("REPLAY_START_EPOCH", str(start))
+    _set_required_env(monkeypatch)
+
+    result = scaler.handler({}, None)
+
+    # 600 backlogged messages need 60 instances, far above anything the quiet
+    # forecast would ask for; the cap then clamps it to max_size.
+    assert result["desired"] == 30 or result["desired"] == int(os.environ["MAX_SIZE"])
+    assert calls[0]["DesiredCapacity"] == int(os.environ["MAX_SIZE"])

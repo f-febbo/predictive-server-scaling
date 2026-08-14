@@ -139,6 +139,20 @@ variable "enable_native_predictive_scaling" {
 
 # --- guard rails ------------------------------------------------------------
 
+variable "backlog_drain_seconds" {
+  description = <<-EOT
+    Time budget for the scaler to clear an existing backlog.
+
+    This is the reactive floor under the predictive policy. Without it the
+    scaler provisions exactly enough for the incoming rate and nothing to catch
+    up with, so any backlog persists indefinitely -- which is precisely what
+    happened on the first run when spot capacity became unavailable and the
+    fleet could not recover afterwards.
+  EOT
+  type        = number
+  default     = 300
+}
+
 variable "shutdown_after_hours" {
   description = <<-EOT
     Hours after the replay starts at which the watchdog pins every fleet to

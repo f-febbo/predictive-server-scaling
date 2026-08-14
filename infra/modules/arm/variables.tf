@@ -1,3 +1,8 @@
+variable "project" {
+  description = "Project tag value."
+  type        = string
+}
+
 variable "name" {
   description = "Full resource name prefix for this arm."
   type        = string

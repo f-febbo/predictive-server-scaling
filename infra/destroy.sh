@@ -32,11 +32,33 @@ terraform destroy -auto-approve
 
 echo "==> Verifying nothing survived"
 
+# Instances are matched by their Auto Scaling group name, NOT by a Project tag.
+#
+# This check originally filtered on tag:Project and was silently useless: the
+# provider's default_tags do not reach instances launched by an Auto Scaling
+# group, because the ASG service launches them rather than Terraform. The
+# filter matched nothing, so the script printed "All clear" with nine instances
+# running. A teardown check that cannot fail is worse than no check at all,
+# since it actively encourages walking away.
+#
+# The group-name tag is applied by EC2 Auto Scaling itself, so it is present
+# regardless of how the stack was tagged.
 remaining_instances=$(aws ec2 describe-instances \
   --region "$REGION" \
-  --filters "Name=tag:Project,Values=${PROJECT}" \
+  --filters "Name=tag:aws:autoscaling:groupName,Values=${PROJECT}-*" \
             "Name=instance-state-name,Values=pending,running,stopping,stopped" \
   --query 'length(Reservations[].Instances[])' --output text 2>/dev/null || echo 0)
+
+# Belt and braces: anything still carrying the project name, however tagged.
+tagged_instances=$(aws ec2 describe-instances \
+  --region "$REGION" \
+  --filters "Name=tag:Name,Values=${PROJECT}-*" \
+            "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+  --query 'length(Reservations[].Instances[])' --output text 2>/dev/null || echo 0)
+
+if [ "${tagged_instances}" != "0" ]; then
+  remaining_instances="${tagged_instances}"
+fi
 
 remaining_asgs=$(aws autoscaling describe-auto-scaling-groups \
   --region "$REGION" \
