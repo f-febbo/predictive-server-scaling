@@ -27,6 +27,7 @@ module "arm" {
   security_group_id     = aws_security_group.worker.id
   instance_profile_name = aws_iam_instance_profile.worker.name
   instance_type         = var.instance_type
+  instance_types        = var.instance_types
   ami_id                = data.aws_ssm_parameter.al2023.value
 
   service_seconds    = var.service_seconds

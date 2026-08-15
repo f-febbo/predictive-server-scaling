@@ -165,14 +165,14 @@ resource "aws_autoscaling_group" "workers" {
   # A single spot instance type in a single family is a single point of
   # failure. Mid-run this group spent hours unable to launch anything --
   # "We currently do not have sufficient t4g.small capacity in the
-  # Availability Zone you requested" -- while its queue backed up. That is not
-  # a scaling result, it is a capacity result, and it contaminates the
-  # comparison the experiment is trying to make.
+  # Availability Zone you requested" -- while its queue backed up. That is a
+  # capacity result, not a scaling result, and it contaminates the comparison.
   #
-  # Offering several Graviton types across both subnets lets the group take
-  # whatever spot capacity exists. They differ in size, which is wasteful when
-  # a worker handles one message at a time, but an oversized instance that
-  # exists beats a correctly sized one that does not.
+  # BUT: widening the list is not free on every account. The first attempt at
+  # this fix added six larger Graviton types, and every launch of them failed
+  # with "The specified instance type is not eligible for Free Tier" -- an AWS
+  # Free Tier account may only launch free-tier-eligible types, so the fix made
+  # the outage worse rather than better. See var.instance_types.
   mixed_instances_policy {
     launch_template {
       launch_template_specification {
@@ -180,13 +180,12 @@ resource "aws_autoscaling_group" "workers" {
         version            = "$Latest"
       }
 
-      override { instance_type = "t4g.small" }
-      override { instance_type = "t4g.medium" }
-      override { instance_type = "t4g.large" }
-      override { instance_type = "m6g.medium" }
-      override { instance_type = "m6g.large" }
-      override { instance_type = "c6g.medium" }
-      override { instance_type = "c6g.large" }
+      dynamic "override" {
+        for_each = var.instance_types
+        content {
+          instance_type = override.value
+        }
+      }
     }
 
     instances_distribution {

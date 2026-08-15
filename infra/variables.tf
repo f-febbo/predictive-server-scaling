@@ -183,3 +183,13 @@ variable "allowed_ssh_cidr" {
   type        = string
   default     = ""
 }
+
+variable "instance_types" {
+  description = <<-EOT
+    Instance types the Auto Scaling groups may launch, best-first. Passed
+    through to the arm module; see its variables.tf for the Free Tier and
+    architecture constraints that decide what is legal here.
+  EOT
+  type        = list(string)
+  default     = ["t4g.small", "t4g.micro"]
+}
